@@ -1,0 +1,5 @@
+.idea/
+log.txt
+code/
+build/
+meson.build
