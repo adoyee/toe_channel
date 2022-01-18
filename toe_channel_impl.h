@@ -71,15 +71,15 @@ struct rx_queue {
 };
 
 void
-rx_queue_recv_pkt(struct rx_queue *queue, struct rte_mbuf *pkt);
+rx_queue_recv_data(struct rx_queue *queue, struct rte_mbuf *pkt);
 
 /** recv packet in normal ack state */
 void
-rx_queue_recv_pkt_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt);
+rx_queue_recv_data_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt);
 
 /** recv packet in nack state */
 void
-rx_queue_recv_pkt_nack_state(struct rx_queue *queue, struct rte_mbuf *pkt);
+rx_queue_recv_data_nack_state(struct rx_queue *queue, struct rte_mbuf *pkt);
 
 struct rte_mbuf *
 rx_queue_get_ack_pkt(struct rx_queue *queue, struct rte_mempool *pool);

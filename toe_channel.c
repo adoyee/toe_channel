@@ -302,7 +302,7 @@ toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n)
 #endif
 
         if(flag & FLAG_DATA_FRAME)
-            rx_queue_recv_pkt(channel->rx_queue, pkt);
+            rx_queue_recv_data(channel->rx_queue, pkt);
         if(flag & FLAG_NACK_FRAME)
             tx_queue_recv_nack(channel->tx_queue, pkt);
         if(flag & FLAG_ACK_FRAME)
@@ -313,21 +313,21 @@ toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n)
 }
 
 void
-rx_queue_recv_pkt(struct rx_queue *queue, struct rte_mbuf *pkt)
+rx_queue_recv_data(struct rx_queue *queue, struct rte_mbuf *pkt)
 {
     switch (queue->state) {
         case RX_STATE_NORMAL:
         case RX_STATE_NACK_TO_NORMAL:
-            rx_queue_recv_pkt_ack_state(queue, pkt);
+            rx_queue_recv_data_ack_state(queue, pkt);
             break;
         case RX_STATE_NACK:
         case RX_STATE_NORMAL_TO_NACK:
-            rx_queue_recv_pkt_nack_state(queue, pkt);
+            rx_queue_recv_data_nack_state(queue, pkt);
     }
 }
 
 void
-rx_queue_recv_pkt_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt)
+rx_queue_recv_data_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt)
 {
     struct frame_hdr *hdr;
     uint32_t seq;
@@ -364,7 +364,7 @@ rx_queue_recv_pkt_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt)
 }
 
 void
-rx_queue_recv_pkt_nack_state(struct rx_queue *queue, struct rte_mbuf *pkt)
+rx_queue_recv_data_nack_state(struct rx_queue *queue, struct rte_mbuf *pkt)
 {
     struct frame_hdr *hdr;
     uint32_t seq;
