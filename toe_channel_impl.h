@@ -19,15 +19,17 @@ extern "C" {
 #define FLAG_HANDSHAKE_FRAME    RTE_TCP_ECE_FLAG
 
 /** 最大允许未确认包数 */
-#define FRAME_ACK_SIZE          8
+#define FRAME_ACK_SIZE          512
 /** 收发队列，需要远大于允许未确认数 */
-#define RX_TX_QUEUE_SIZE        512
+#define RX_TX_QUEUE_SIZE        1024
 /** 每次接收数量(rx_burst) */
 #define RX_TX_BUFF_SIZE         8
 /** tcp_port = port_offset + channel_id */
 #define PORT_OFFSET             8000
 
 #define NAME_LEN                32
+
+//#define DEBUG_TX_RX_LOG
 
 struct frame_hdr {
     struct rte_ether_hdr ether_hdr;
@@ -60,6 +62,7 @@ typedef enum {
 
 struct rx_queue {
     uint32_t cur_ack;
+    uint16_t cur_ip_id;
     uint32_t cur_nack;
     rx_state_t state;
     struct toe_channel *channel;
@@ -117,7 +120,7 @@ tx_queue_free_ack(struct tx_queue *queue, uint32_t ack);
 struct rte_mbuf *
 tx_queue_dequeue(struct tx_queue *queue);
 
-void
+toe_err_t
 tx_queue_enqueue(struct tx_queue *queue, struct rte_mbuf *pkt);
 
 uint32_t
@@ -135,11 +138,11 @@ struct toe_channel{
     uint16_t channel_id;
     rte_atomic64_t ip_id;
     rte_atomic64_t seq;
-    rte_atomic64_t recv_raw_pkts;
-    channel_state_t state;
     struct rte_mempool *pool;
+    channel_state_t state;
     uint16_t port_id;
     uint16_t dev_rx_queue;
+    uint64_t rx_buf_len;
     struct rte_mbuf *rx_buf[RX_TX_QUEUE_SIZE];
     struct rx_queue *rx_queue;
     struct tx_queue *tx_queue;
@@ -223,9 +226,9 @@ toe_channel_frame_set_seq(struct toe_channel *channel, struct rte_mbuf *pkt)
     uint32_t  seq;
 
     hdr = frame_hdr_mtod(pkt);
-    seq = channel->seq.cnt;
-    channel->seq.cnt += 1;
-    hdr->tcp_hdr.sent_seq = htobe32(seq);
+    seq = rte_atomic64_add_return(&channel->seq, 1);
+    channel->stats.tx_seq = channel->seq.cnt;
+    hdr->tcp_hdr.sent_seq = htobe32(seq - 1);
     hdr->tcp_hdr.tcp_flags |= FLAG_DATA_FRAME;
 }
 
@@ -244,7 +247,6 @@ toe_channel_frame_fill_id(struct toe_channel *channel, struct rte_mbuf *pkt)
     hdr->ip4_hdr.packet_id = ip_id_be;
 }
 
-
 void
 toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n);
 
@@ -252,6 +254,7 @@ __rte_unused void
 prefetch_channel(struct toe_channel *channel)
 {
     rte_prefetch2(channel->fill_frame_fields);
+    rte_prefetch2(channel->other_field);
 }
 
 #ifdef __cplusplus

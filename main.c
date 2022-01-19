@@ -7,35 +7,27 @@
 #include <rte_ether.h>
 
 #include "toe_channel.h"
-#include "toe_queue.h"
 
 static char *master_channel = "MASTER-CH";
 static char *slave_channel = "SLAVE-CH";
 
-static uint64_t tx_seq_n = 0;
-static uint64_t rx_seq_n = 0;
-
-struct toe_master *app_master;
-struct toe_slave *app_slave;
-
 struct toe_channel *m_channel;
 struct toe_channel *s_channel;
 
-
-static struct rte_mempool *gen_pool;
-static struct rte_mbuf *
+struct rte_mbuf *
 pkt_gen() {
+    static struct rte_mempool *gen_pool = NULL;
     struct rte_mbuf *pkt;
     if(!gen_pool){
-        gen_pool = rte_pktmbuf_pool_create("gen-pool", 512, 256, 0, 4096, (int)rte_socket_id());
+        gen_pool = rte_pktmbuf_pool_create("gen-pool", 2048, 256, 0, 1024 * 5, (int)rte_socket_id());
     }
-    tx_seq_n += 1;
     pkt = rte_pktmbuf_alloc(gen_pool);
-    rte_pktmbuf_prepend(pkt, 4096);
+    if(!pkt){
+        return NULL;
+    }
+    rte_pktmbuf_append(pkt, 512);
     return pkt;
 }
-
-#define DEV_MTU (1024 * 9)
 
 int slave_loop(void *ctx){
     rte_delay_ms(10);
@@ -46,56 +38,63 @@ int slave_loop(void *ctx){
     assert(slave);
     s_channel = slave;
     toe_channel_connect(slave);
-    rte_delay_ms(5);
 
-    struct rte_mbuf *rq, *cq;
-
-    rte_delay_ms(10);
     for(;;){
-        int capacity = 0;
+        struct rte_mbuf *pkt;
+        uint32_t  capacity;
+
+        pkt = toe_channel_rx(slave);
+        if(pkt){
+            rte_pktmbuf_free(pkt);
+        }
+
         capacity = toe_channel_tx_capacity(slave);
         if(capacity == 0){
-//            RTE_LOG(ERR, EAL, "SLAVE tx_queue is full\n");
             continue;
         }
-        struct rte_mbuf *pkt  = pkt_gen();
+
+        pkt = pkt_gen();
+        if(!pkt){
+            RTE_LOG(ERR, EAL, "gen pkt failed\n");
+            continue;
+        }
         toe_channel_tx(slave, pkt);
-        toe_channel_rx(slave);
-
-
-//        rq = toe_master_get_rq(app_master);
-//        toe_channel_tx(slave, rq);
-//        cq = toe_channel_rx(slave);
-//        if(!cq)
-//            continue;
-//        toe_master_put_cq(app_master, cq);
     }
     return 0;
 }
 
- int master_loop(void *ctx){
+int
+master_loop(void *ctx){
     struct channel_option *opt = ctx;
     struct toe_channel *master;
     master = toe_channel_create(opt);
     assert(master);
     m_channel = master;
 
+    for(;;){
+        struct rte_mbuf  *pkt;
+        pkt = toe_channel_rx(master);
+        if(!pkt)
+            continue;
+        rte_pktmbuf_free(pkt);
+    }
+    printf("exit master loop\n");
+    return 0;
+}
 
-     struct rte_mbuf *pkt;
-     for(;;){
-         pkt = toe_channel_rx(master);
-         if(!pkt)
-             continue;
-//         toe_slave_put_rq(app_slave, pkt);
-//         pkt = toe_slave_get_cq(app_slave);
-//         if(!pkt)
-//             continue;
-//         toe_channel_tx(master, pkt);
-        rx_seq_n += 1;
-         rte_pktmbuf_free(pkt);
-     }
-     printf("exit master loop\n");
-     return 0;
+void print_stats(const struct channel_stats *cur, struct channel_stats *last)
+{
+    printf("TX pps:%lu  bps:%.4f Gib Total %lu packets\n",
+           cur->tx_ether - last->tx_ether,
+           (double )(cur->tx_bytes - last->tx_bytes) * 8.0 / (1024.0 * 1024.0 * 1024.0),
+           cur->tx_ether);
+
+    printf("RX pps:%lu  bps:%.4f Gib Total %lu packets\n",
+           cur->rx_ether - last->rx_ether,
+           (double )(cur->rx_bytes - last->rx_bytes) * 8.0 / (1024.0 * 1024.0 * 1024.0),
+           cur->rx_ether);
+
+    memcpy(last, cur, sizeof (struct channel_stats));
 }
 
 int
@@ -124,10 +123,6 @@ main(int argc, char **argv)
     master_lcore = rte_get_next_lcore(lcore, 1, 0);
     slave_lcore = rte_get_next_lcore(master_lcore, 1, 0);
     printf("main-core:%d, master channel core:%d, slave channel core:%d\n", lcore, master_lcore, slave_lcore);
-
-    toe_mbuf_pool_init();
-    app_master =   toe_master_create(0);
-    app_slave = toe_slave_create(0);
 
     rte_be32_t master_ip = RTE_IPV4(192, 168, 0, 1);
     rte_be32_t slave_ip = RTE_IPV4(192, 168, 0, 2);
@@ -161,63 +156,27 @@ main(int argc, char **argv)
     rte_eal_remote_launch(master_loop, &master_opt, master_lcore);
     rte_eal_remote_launch(slave_loop, &slave_opt, slave_lcore);
 
+    struct channel_stats master_stats;
+    struct channel_stats slave_stats;
+    memset(&master_stats, 0, sizeof (struct channel_stats));
+    memset(&slave_stats, 0, sizeof (struct channel_stats));
+
     for(;;){
-        static uint64_t m_tx_packet_last;
-        static uint64_t m_rx_packet_last;
-        static uint64_t m_tx_bytes_last;
-        static uint64_t m_rx_bytes_last;
-
-        static uint64_t s_tx_packet_last;
-        static uint64_t s_rx_packet_last;
-        static uint64_t s_tx_bytes_last;
-        static uint64_t s_rx_bytes_last;
         rte_delay_ms(1000);
-
-        if (!m_channel || !s_channel){
-            printf("Waiting channel initialize\n");
-
+        if(!m_channel  || !s_channel)
             continue;
-        }
-
+//        continue;
         const struct channel_stats *m_stats, *s_stats;
         m_stats = toe_channel_stats(m_channel);
         s_stats = toe_channel_stats(s_channel);
-
-//        const char clr[] = { 27, '[', '2', 'J', '\0' };
-//        const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
-//
-//        /* Clear screen and move to top left */
-//        printf("%s%s", clr, topLeft);
-
-        printf("==== Master side ====\n");
-        printf("tx packets:%lu, rx packets:%lu\n", m_stats->tx_ether, m_stats->rx_ether);
-        printf("tx pps:%lu bps:%lu, rx pps:%lu bps:%lu\n",
-               m_stats->tx_ether - m_tx_packet_last,
-               (m_stats->tx_bytes - m_tx_bytes_last) * 8,
-               m_stats->rx_ether - m_rx_packet_last,
-               (m_stats->rx_bytes - m_rx_bytes_last) * 8);
-
-        m_tx_bytes_last = m_stats->tx_bytes;
-        m_tx_packet_last = m_stats->tx_ether;
-        m_rx_bytes_last = m_stats->rx_bytes;
-        m_rx_packet_last = m_stats->rx_ether;
-
-        printf("==== Slave side ====\n");
-        printf("tx packets:%lu, rx packets:%lu\n", s_stats->tx_ether, s_stats->rx_ether);
-        printf("tx pps:%lu bps:%lu, rx pps:%lu bps:%lu\n",
-               s_stats->tx_ether - s_tx_packet_last,
-               (s_stats->tx_bytes - s_tx_bytes_last) * 8,
-               s_stats->rx_ether - s_rx_packet_last,
-               (s_stats->rx_bytes - s_rx_bytes_last) * 8);
-
-        s_tx_bytes_last = s_stats->tx_bytes;
-        s_tx_packet_last = s_stats->tx_ether;
-        s_rx_bytes_last = s_stats->rx_bytes;
-        s_rx_packet_last = s_stats->rx_ether;
-
+        printf("==== Master Side =====\n");
+        print_stats(m_stats, &master_stats);
+        printf("==== Slave Side =====\n");
+        print_stats(s_stats, &slave_stats);
+        printf("\n");
     }
+
     rte_eal_mp_wait_lcore();
     rte_eal_cleanup();
-
     return 0;
 }
