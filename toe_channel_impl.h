@@ -23,13 +23,15 @@ extern "C" {
 /** 收发队列，不能小于允许未确认数 */
 #define RX_TX_QUEUE_SIZE        1024
 /** 每次接收数量(rx_burst) */
-#define RX_TX_BUFF_SIZE         8
+#define RX_TX_BUFF_SIZE          8
+/** retransmit 定时器 (毫秒) */
+#define TX_RETRANSMIT_TIMER     200
 /** tcp_port = port_offset + channel_id */
 #define PORT_OFFSET             8000
 
 #define NAME_LEN                32
 
-//#define DEBUG_TX_RX_LOG
+#define DEBUG_TX_RX_LOG         0
 
 struct frame_hdr {
     struct rte_ether_hdr ether_hdr;
@@ -102,7 +104,7 @@ struct tx_queue {
     uint32_t sent;
     uint32_t nack;
     uint32_t nack_sent;
-    uint32_t len;
+    uint64_t retry_cycles;
     tx_state_t state;
     struct toe_channel *channel;
     struct rte_mbuf *queue[RX_TX_QUEUE_SIZE];

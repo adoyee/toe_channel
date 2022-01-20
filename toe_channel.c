@@ -74,6 +74,15 @@ setup_port(uint16_t port_id, struct rte_mempool *pool)
     rte_eth_promiscuous_enable(port_id);
 }
 
+static void inline
+set_timer(uint64_t *timer, uint64_t ms)
+{
+    uint64_t  hz, v;
+    hz = rte_get_timer_hz();
+    v = hz * ms / 1000;
+    *timer = v;
+}
+
 void
 format_frame_flag(char *buf, uint16_t size, const struct frame_hdr *hdr)
 {
@@ -124,28 +133,6 @@ format_frame_hdr(char *buf, uint16_t size, const struct frame_hdr *hdr)
              flag,
              be32toh(hdr->frame_seq),
              be32toh(hdr->frame_ack), hdr);
-}
-
-static inline bool
-uint32_less_than(uint32_t a, uint32_t b)
-{
-    if(likely(a < b))
-        return true;
-
-    if((a - b) > (UINT32_MAX - RX_TX_QUEUE_SIZE))
-        return true;
-    return false;
-}
-
-static inline bool
-uint32_greater_than(uint32_t a, uint32_t b)
-{
-    if(likely(a > b))
-        return true;
-
-    if((b - a) > (UINT32_MAX - RX_TX_QUEUE_SIZE))
-        return true;
-    return false;
 }
 
 const struct channel_stats *
@@ -295,7 +282,7 @@ toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n)
             return;
         }
 
-#ifdef DEBUG_TX_RX_LOG
+#if DEBUG_TX_RX_LOG
         char msg[256];
         format_frame_hdr(msg, 256, hdr);
         RTE_LOG(INFO, EAL, "%s RX %s\n", channel->name, msg);
@@ -344,23 +331,34 @@ rx_queue_recv_data_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt)
         queue->cur_ip_id = be16toh(hdr->frame_ip_id);
         saved_pkt = rte_pktmbuf_clone(pkt, pkt->pool);
         err = rte_ring_enqueue(queue->items, saved_pkt);
-        if(err)
+        if(unlikely(err)){
+            RTE_LOG(ERR, RING, "can not enqueue saved pkt.\n");
             rte_pktmbuf_free(saved_pkt);
+        }
+        return;
+    }
+
+    int32_t step_len;
+    step_len = (int32_t) (seq - queue->cur_ack);
+
+    /** 收到的seq不在预期范围内 */
+    if(unlikely(step_len > FRAME_ACK_SIZE || step_len < -FRAME_ACK_SIZE)){
+        /** TODO: reset or ignore ? */
+        return;
+    }
+
+    /** 已经收到过的 */
+    if(step_len < 0){
         return;
     }
 
     /** 收到了不连续seq */
-    if(uint32_greater_than(seq, queue->cur_ack)){
-        queue->state = RX_STATE_NORMAL_TO_NACK;
-        queue->cur_nack = seq;
-        RTE_LOG(INFO, USER1, "rx_queue enter nack-state, %u, expected %u. cur-ip:%d pre-ip:%d\n",
-                seq, queue->cur_ack,
-                be16toh(hdr->frame_ip_id), queue->cur_ip_id
-                );
-        rte_panic("nack\n");
-    }
-
-    /** 忽略掉seq小于cur_ack的包 */
+    queue->state = RX_STATE_NORMAL_TO_NACK;
+    queue->cur_nack = seq;
+    RTE_LOG(INFO, USER1, "rx_queue enter nack-state, %u, expected %u. cur-ip:%d pre-ip:%d\n",
+            seq, queue->cur_ack,
+            be16toh(hdr->frame_ip_id), queue->cur_ip_id
+    );
 }
 
 void
@@ -406,7 +404,7 @@ rx_queue_get_ack_pkt(struct rx_queue *queue, struct rte_mempool *pool)
     switch (queue->state) {
         case RX_STATE_NORMAL:
             /** ACK 不重发 */
-            if(queue->cur_ack != queue->pre_sent_ack){
+            if(queue->cur_ack != queue->pre_sent_ack) {
                 queue->pre_sent_ack = queue->cur_ack;
                 pkt = rte_pktmbuf_alloc(pool);
                 assert(pkt);
@@ -505,7 +503,15 @@ tx_queue_dequeue(struct tx_queue *queue)
     struct rte_mbuf *pkt, *ret;
     uint32_t  index;
 
-    if(unlikely(queue->len == 0))
+    /** check timer */
+    uint64_t now = rte_get_timer_cycles();
+    if (unlikely(now > queue->retry_cycles)){
+        queue->sent = queue->cur_ack;
+        queue->nack_sent = queue->cur_ack;
+        set_timer(&queue->retry_cycles, TX_RETRANSMIT_TIMER);
+    }
+
+    if(unlikely(queue->tail - queue->head == 0))
         return NULL;
 
     if(likely(queue->state == TX_STATE_NORMAL)){
@@ -513,22 +519,20 @@ tx_queue_dequeue(struct tx_queue *queue)
             index = queue->sent % RX_TX_QUEUE_SIZE;
             pkt = queue->queue[index];
             queue->sent += 1;
-            queue->len -= 1;
             ret = rte_pktmbuf_clone(pkt, pkt->pool);
             return ret;
         }
         return NULL;
     }
 
-    /** nack state : 重复发送 cur_ack 到 cur_nack 之间的数据 */
-    if(queue->nack_sent == queue->nack){
-        queue->nack_sent = queue->cur_ack;
+    /** nack state */
+    if(unlikely(queue->nack_sent == queue->nack)){
+        return NULL;
     }
 
     index = queue->nack_sent % RX_TX_QUEUE_SIZE;
     pkt = queue->queue[index];
     queue->nack_sent += 1;
-    queue->len -= 1;
     ret = rte_pktmbuf_clone(pkt, pkt->pool);
     return ret;
 }
@@ -537,9 +541,10 @@ tx_queue_dequeue(struct tx_queue *queue)
 toe_err_t
 tx_queue_enqueue(struct tx_queue *queue, struct rte_mbuf *pkt)
 {
-    uint32_t index;
+    uint32_t index, len;
 
-    if(queue->len > FRAME_ACK_SIZE)
+    len = queue->tail - queue->head;
+    if(len > FRAME_ACK_SIZE)
         return 1;
 
     index = queue->tail % RX_TX_QUEUE_SIZE;
@@ -553,7 +558,6 @@ tx_queue_enqueue(struct tx_queue *queue, struct rte_mbuf *pkt)
 
     queue->queue[index] = pkt;
     queue->tail += 1;
-    queue->len += 1;
     return 0;
 }
 
@@ -578,6 +582,7 @@ tx_queue_recv_ack(struct tx_queue *queue, struct rte_mbuf *pkt)
         return;
     }
 
+    set_timer(&queue->retry_cycles, TX_RETRANSMIT_TIMER);
     queue->state = TX_STATE_NORMAL;
     tx_queue_free_ack(queue, ack);
     queue->cur_ack = ack;
@@ -587,26 +592,22 @@ void
 tx_queue_recv_nack(struct tx_queue *queue, struct rte_mbuf *pkt)
 {
     struct frame_hdr *hdr;
-    uint32_t nack;
+    uint32_t nack, diff_nack, len;
 
     hdr = frame_hdr_mtod(pkt);
     nack = be32toh(hdr->frame_ack);
 
     if(queue->state == TX_STATE_NACK)
         return;
-
-    if(uint32_greater_than(nack, queue->tail)){
-        RTE_LOG(ERR, USER1, "get incorrect nack:%d cur_ack:%d cur_tail:%d\n",
-                nack, queue->cur_ack, queue->tail);
+    len = queue->tail - queue->head;
+    diff_nack = nack - queue->cur_ack;
+    if(diff_nack > len){
+        /** TODO: reset */
         return;
     }
 
-    if(uint32_less_than(nack, queue->head)){
-        RTE_LOG(ERR, USER1, "get incorrect nack:%d cur_ack:%d cur_tail:%d\n",
-                nack, queue->cur_ack, queue->tail);
-        return;
-    }
-
+    RTE_LOG(INFO, EAL, "tx_queue enter nack-state with nack:%u\n", nack);
+    set_timer(&queue->retry_cycles, TX_RETRANSMIT_TIMER);
     queue->state = TX_STATE_NACK;
     queue->nack_sent = queue->cur_ack;
     queue->nack = nack;
