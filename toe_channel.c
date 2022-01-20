@@ -77,9 +77,10 @@ setup_port(uint16_t port_id, struct rte_mempool *pool)
 static void inline
 set_timer(uint64_t *timer, uint64_t ms)
 {
-    uint64_t  hz, v;
+    uint64_t  now, hz, v;
+    now = rte_get_timer_cycles();
     hz = rte_get_timer_hz();
-    v = hz * ms / 1000;
+    v = now +  hz * ms / 1000;
     *timer = v;
 }
 
@@ -505,7 +506,7 @@ tx_queue_dequeue(struct tx_queue *queue)
 
     /** check timer */
     uint64_t now = rte_get_timer_cycles();
-    if (unlikely(now > queue->retry_cycles)){
+    if (unlikely((int64_t)(now - queue->retry_cycles) > 0)){
         queue->sent = queue->cur_ack;
         queue->nack_sent = queue->cur_ack;
         set_timer(&queue->retry_cycles, TX_RETRANSMIT_TIMER);
@@ -664,7 +665,7 @@ toe_channel_do_tx_pkt(struct toe_channel *channel, struct rte_mbuf *pkt)
     }else{
         channel->stats.tx_bytes += len;
         channel->stats.tx_ether += 1;
-#ifdef  DEBUG_TX_RX_LOG
+#if  DEBUG_TX_RX_LOG
         RTE_LOG(ERR, EAL, "%s TX :FRAME :%s\n", channel->name, msg);
 #endif
     }

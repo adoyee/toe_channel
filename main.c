@@ -25,7 +25,7 @@ pkt_gen() {
     if(!pkt){
         return NULL;
     }
-    rte_pktmbuf_append(pkt, 512);
+    rte_pktmbuf_append(pkt, 4096);
     return pkt;
 }
 
