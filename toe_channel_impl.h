@@ -20,7 +20,7 @@ extern "C" {
 
 /** 最大允许未确认包数 */
 #define FRAME_ACK_SIZE          512
-/** 收发队列，需要远大于允许未确认数 */
+/** 收发队列，不能小于允许未确认数 */
 #define RX_TX_QUEUE_SIZE        1024
 /** 每次接收数量(rx_burst) */
 #define RX_TX_BUFF_SIZE         8
