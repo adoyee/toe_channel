@@ -25,13 +25,14 @@ extern "C" {
 /** 每次接收数量(rx_burst) */
 #define RX_TX_BUFF_SIZE          8
 /** retransmit 定时器 (毫秒) */
-#define TX_RETRANSMIT_TIMER     200
+#define TX_RETRANSMIT_TIMER     20
 /** tcp_port = port_offset + channel_id */
 #define PORT_OFFSET             8000
 
 #define NAME_LEN                32
 
 #define DEBUG_TX_RX_LOG         0
+#define DEBUG_RANDOM_DROP       10000
 
 struct frame_hdr {
     struct rte_ether_hdr ether_hdr;
@@ -64,7 +65,6 @@ typedef enum {
 
 struct rx_queue {
     uint32_t cur_ack;
-    uint16_t cur_ip_id;
     uint32_t cur_nack;
     rx_state_t state;
     struct toe_channel *channel;
@@ -92,20 +92,12 @@ rx_queue_dequeue(struct rx_queue *queue);
 struct rx_queue *
 rx_queue_create(struct toe_channel *channel);
 
-typedef enum {
-    TX_STATE_NORMAL = 0,
-    TX_STATE_NACK,
-} tx_state_t;
-
 struct tx_queue {
     uint32_t cur_ack;
     uint32_t head;
     uint32_t tail;
     uint32_t sent;
-    uint32_t nack;
-    uint32_t nack_sent;
     uint64_t retry_cycles;
-    tx_state_t state;
     struct toe_channel *channel;
     struct rte_mbuf *queue[RX_TX_QUEUE_SIZE];
 };
@@ -165,11 +157,10 @@ void toe_channel_do_rx(struct toe_channel *channel);
 uint16_t
 toe_channel_do_rx_burst(struct toe_channel *channel, uint16_t queue_n);
 
-
 void
 toe_channel_do_tx(struct toe_channel *channel);
 
-int
+toe_err_t
 toe_channel_do_tx_pkt(struct toe_channel *channel, struct rte_mbuf *pkt);
 
 void

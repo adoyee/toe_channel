@@ -11,6 +11,10 @@ extern "C" {
 struct toe_channel;
 typedef int toe_err_t;
 
+#define TOE_SUCCESS     0
+#define TOE_FAIL        1
+
+
 struct channel_option {
     struct rte_ether_addr   remote_ether;
     struct rte_ether_addr   local_ether;
@@ -25,6 +29,7 @@ struct channel_stats {
     uint64_t rx_ether;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
+    uint64_t tx_drops;
     uint64_t tx_seq;
     uint64_t rx_seq;
 };
@@ -39,7 +44,7 @@ toe_channel_connect(struct toe_channel *channel);
 __rte_unused void
 toe_channel_close(struct toe_channel *channel);
 
-int
+toe_err_t
 toe_channel_tx(struct toe_channel *channel, struct rte_mbuf *pkt);
 
 struct rte_mbuf *

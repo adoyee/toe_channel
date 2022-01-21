@@ -163,9 +163,9 @@ main(int argc, char **argv)
 
     for(;;){
         rte_delay_ms(1000);
+//        continue;
         if(!m_channel  || !s_channel)
             continue;
-//        continue;
         const struct channel_stats *m_stats, *s_stats;
         m_stats = toe_channel_stats(m_channel);
         s_stats = toe_channel_stats(s_channel);
