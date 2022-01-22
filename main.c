@@ -84,15 +84,24 @@ master_loop(void *ctx){
 
 void print_stats(const struct channel_stats *cur, struct channel_stats *last)
 {
-    printf("TX pps:%lu  bps:%.4f Gib Total %lu packets\n",
+    printf("TX pps:%lu bps:%.4f Gib Total %lu packets\n"
+           "TX tps:%lu bps:%.4f Gib Total %lu sequences\n",
+
            cur->tx_ether - last->tx_ether,
            (double )(cur->tx_bytes - last->tx_bytes) * 8.0 / (1024.0 * 1024.0 * 1024.0),
-           cur->tx_ether);
+           cur->tx_ether,
+           cur->tx_seq - last->tx_seq,
+           (double )(cur->tx_seq_bytes - last->tx_seq_bytes) * 8.0 /(1024.0 * 1024.0 * 1024.0),
+           cur->tx_seq);
 
-    printf("RX pps:%lu  bps:%.4f Gib Total %lu packets\n",
+    printf("RX pps:%lu bps:%.4f Gib Total %lu packets\n"
+           "RX tps:%lu bps:%.4f Gib Total %lu sequences\n ",
            cur->rx_ether - last->rx_ether,
            (double )(cur->rx_bytes - last->rx_bytes) * 8.0 / (1024.0 * 1024.0 * 1024.0),
-           cur->rx_ether);
+           cur->rx_ether,
+           cur->rx_seq - last->rx_seq,
+           (double )(cur->rx_seq_bytes - last->rx_seq_bytes) * 8.0 /(1024.0 * 1024.0 * 1024.0),
+           cur->rx_seq);
 
     memcpy(last, cur, sizeof (struct channel_stats));
 }
@@ -173,6 +182,19 @@ main(int argc, char **argv)
         print_stats(m_stats, &master_stats);
         printf("==== Slave Side =====\n");
         print_stats(s_stats, &slave_stats);
+        printf("==== Summary =====\n");
+        double rate;
+        rate = (double )m_stats->rx_ether/s_stats->tx_ether * 100.0;
+        printf("IP     TX: %lu  RX : %lu TX/RX: %.2f%% Drop: %.2f%%\n",
+            s_stats->tx_ether, m_stats->rx_ether, rate,  (100.0 - rate));
+
+        rate = (double )m_stats->rx_seq/s_stats->tx_seq * 100.0;
+        printf("Seq    TX: %lu  RX : %lu TX/RX: %.2f%% Drop: %.2f%%\n",
+               s_stats->tx_seq, m_stats->rx_seq, rate, 100.0 - rate);
+
+        printf("Seq/IP TX: %.2f%%  RX: %.2f%%\n",
+               (double )s_stats->tx_seq/s_stats->tx_ether*100.0,
+               (double )m_stats->rx_seq/m_stats->rx_ether*100.0);
         printf("\n");
     }
 

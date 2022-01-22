@@ -19,11 +19,11 @@ extern "C" {
 #define FLAG_HANDSHAKE_FRAME    RTE_TCP_ECE_FLAG
 
 /** 最大允许未确认包数 */
-#define FRAME_ACK_SIZE          512
+#define FRAME_ACK_SIZE          256
 /** 收发队列，不能小于允许未确认数 */
 #define RX_TX_QUEUE_SIZE        1024
 /** 每次接收数量(rx_burst) */
-#define RX_TX_BUFF_SIZE          8
+#define RX_TX_BUFF_SIZE         32
 /** retransmit 定时器 (毫秒) */
 #define TX_RETRANSMIT_TIMER     20
 /** tcp_port = port_offset + channel_id */
@@ -32,7 +32,7 @@ extern "C" {
 #define NAME_LEN                32
 
 #define DEBUG_TX_RX_LOG         0
-#define DEBUG_RANDOM_DROP       10000
+#define DEBUG_RANDOM_DROP       0
 
 struct frame_hdr {
     struct rte_ether_hdr ether_hdr;
@@ -58,30 +58,20 @@ format_frame_hdr(char *buf, uint16_t size, const struct frame_hdr *hdr);
 
 typedef enum {
     RX_STATE_NORMAL = 0,
-    RX_STATE_NORMAL_TO_NACK,
     RX_STATE_NACK,
-    RX_STATE_NACK_TO_NORMAL,
 } rx_state_t;
 
 struct rx_queue {
     uint32_t cur_ack;
-    uint32_t cur_nack;
+    uint32_t send_ack;
+    uint32_t last_nack;
     rx_state_t state;
     struct toe_channel *channel;
-    uint32_t pre_sent_ack;      /** 上次发送的ACK  */
     struct rte_ring *items;     /** 保存已经发送过ACK的包 */
 };
 
 void
 rx_queue_recv_data(struct rx_queue *queue, struct rte_mbuf *pkt);
-
-/** recv packet in normal ack state */
-void
-rx_queue_recv_data_ack_state(struct rx_queue *queue, struct rte_mbuf *pkt);
-
-/** recv packet in nack state */
-void
-rx_queue_recv_data_nack_state(struct rx_queue *queue, struct rte_mbuf *pkt);
 
 struct rte_mbuf *
 rx_queue_get_ack_pkt(struct rx_queue *queue, struct rte_mempool *pool);
@@ -104,9 +94,6 @@ struct tx_queue {
 
 void
 tx_queue_recv_ack(struct tx_queue *queue, struct rte_mbuf *pkt);
-
-void
-tx_queue_recv_nack(struct tx_queue *queue, struct rte_mbuf *pkt);
 
 void
 tx_queue_free_ack(struct tx_queue *queue, uint32_t ack);
@@ -190,26 +177,15 @@ toe_channel_frame_set_ack(struct toe_channel *channel, struct rte_mbuf *pkt)
 
     hdr = frame_hdr_mtod(pkt);
     ack = channel->rx_queue->cur_ack;
-
     hdr->tcp_hdr.recv_ack = htobe32(ack);
-    /** ACK 和 NACK 不能共存 */
-    hdr->tcp_hdr.tcp_flags &= (~FLAG_NACK_FRAME);
-    hdr->tcp_hdr.tcp_flags |= FLAG_ACK_FRAME;
-}
 
-static inline void
-toe_channel_frame_set_nack(struct toe_channel *channel, struct rte_mbuf *pkt)
-{
-    struct frame_hdr *hdr;
-    uint32_t  nack;
-
-    hdr = frame_hdr_mtod(pkt);
-    nack = channel->rx_queue->cur_nack;
-
-    hdr->tcp_hdr.recv_ack = htobe32(nack);
-    /** ACK 和 NACK 不能共存 */
-    hdr->tcp_hdr.tcp_flags &= (~FLAG_ACK_FRAME);
-    hdr->tcp_hdr.tcp_flags |= FLAG_NACK_FRAME;
+    if(likely(channel->rx_queue->state == RX_STATE_NORMAL)){
+        hdr->tcp_hdr.tcp_flags &= (~FLAG_NACK_FRAME);
+        hdr->tcp_hdr.tcp_flags |= FLAG_ACK_FRAME;
+    } else {
+        hdr->tcp_hdr.tcp_flags &= (~FLAG_ACK_FRAME);
+        hdr->tcp_hdr.tcp_flags |= FLAG_NACK_FRAME;
+    }
 }
 
 static inline void
