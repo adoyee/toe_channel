@@ -7,9 +7,11 @@
 static struct rte_eth_conf port_conf = {
         .rxmode = {
                 .split_hdr_size = 0,
+                .offloads = DEV_RX_OFFLOAD_CHECKSUM,
         },
         .txmode = {
                 .mq_mode = ETH_MQ_TX_NONE,
+                .offloads = DEV_TX_OFFLOAD_IPV4_CKSUM | DEV_TX_OFFLOAD_TCP_CKSUM,
         },
 };
 
@@ -265,6 +267,11 @@ toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n)
     for(uint16_t i = 0; i < pkt_n; i++){
         pkt = channel->rx_buf[i];
         channel->stats.rx_bytes += rte_pktmbuf_pkt_len(pkt);
+
+        if(pkt->ol_flags & PKT_RX_IP_CKSUM_BAD){
+            channel->stats.rx_error += 1;
+            continue;
+        }
 
         if(unlikely(rte_pktmbuf_pkt_len(pkt) < frame_hdr_len))
             continue;
@@ -780,7 +787,7 @@ toe_channel_frame_prepend(struct toe_channel *channel, struct rte_mbuf *pkt)
 
     hdr = frame_hdr_mtod(pkt);
     memset(hdr, 0, frame_hdr_len);
-    hdr->ether_hdr.ether_type = RTE_ETHER_TYPE_IPV4;
+    hdr->ether_hdr.ether_type = htobe16(RTE_ETHER_TYPE_IPV4);
     hdr->ip4_hdr.next_proto_id = IPPROTO_TCP;
     hdr->ip4_hdr.time_to_live = 64;
     hdr->ip4_hdr.version_ihl = RTE_IPV4_VHL_DEF;

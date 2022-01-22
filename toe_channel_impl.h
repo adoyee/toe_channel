@@ -238,6 +238,10 @@ toe_channel_frame_fill_id(struct toe_channel *channel, struct rte_mbuf *pkt)
 
     hdr = frame_hdr_mtod(pkt);
     hdr->ip4_hdr.packet_id = ip_id_be;
+
+    pkt->ol_flags |= (PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM);
+    pkt->l2_len = sizeof (struct rte_ether_hdr);
+    pkt->l3_len = sizeof (struct rte_ipv4_hdr);
 }
 
 void

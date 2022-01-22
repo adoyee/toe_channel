@@ -29,6 +29,7 @@ struct channel_stats {
     uint64_t rx_ether;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
+    uint64_t rx_error;
     uint64_t tx_drops;
     uint64_t tx_seq;
     uint64_t rx_seq;
