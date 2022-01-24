@@ -706,6 +706,7 @@ toe_channel_frame_prepend(struct toe_channel *channel, struct rte_mbuf *pkt)
     hdr->ip4_hdr.src_addr = channel->local_ip;
     hdr->tcp_hdr.src_port = htobe16(PORT_OFFSET + channel->channel_id);
     hdr->tcp_hdr.dst_port = htobe16(PORT_OFFSET + channel->channel_id);
+    hdr->tcp_hdr.data_off = 0x50;
 
     return 0;
 }
