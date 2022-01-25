@@ -16,9 +16,11 @@ extern "C" {
 #define FLAG_ACK_FRAME          RTE_TCP_ACK_FLAG
 #define FLAG_NACK_FRAME         RTE_TCP_URG_FLAG
 #define FLAG_DATA_FRAME         RTE_TCP_PSH_FLAG
+#define FLAG_RESET_FRAME        RTE_TCP_RST_FLAG
 
 #define STATE_INIT              0x0000
 #define STATE_EST               0x0100
+#define STATE_RESET             0x0200
 #define STATE_SENT_SYN          0x0001
 #define STATE_WAIT_LAST_ACK     0x0010
 #define STATE_HANDSHAKE_MASK    0x00FF
@@ -52,11 +54,25 @@ struct frame_hdr {
 #define frame_ack       tcp_hdr.recv_ack
 #define frame_flag      tcp_hdr.tcp_flags
 
-static_assert(sizeof (struct rte_ether_hdr) == 14, "assert size failed");
-static_assert(sizeof (struct frame_hdr) == sizeof (struct rte_ether_hdr) \
- + sizeof (struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr), "assert size failed");
+static_assert(sizeof(struct rte_ether_hdr) == 14, "assert size failed");
+static_assert(sizeof(struct frame_hdr) == sizeof(struct rte_ether_hdr) \
+ + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr), "assert size failed");
 
 #define frame_hdr_mtod(m) rte_pktmbuf_mtod(m, struct frame_hdr *)
+#define frame_set_flag(pkt, flag)   \
+do{                                 \
+    struct frame_hdr *hdr;          \
+    hdr = frame_hdr_mtod(pkt);      \
+    hdr->frame_flag = flag;         \
+}while(0)
+
+static void inline
+frame_set_flags(struct rte_mbuf *pkt, uint8_t flag)
+{
+    struct frame_hdr *hdr;
+    hdr = frame_hdr_mtod(pkt);
+    hdr->frame_flag = flag;
+}
 
 void
 format_frame_flag(char *buf, uint16_t size, const struct frame_hdr *hdr);
@@ -89,6 +105,9 @@ rx_queue_dequeue(struct rx_queue *queue);
 struct rx_queue *
 rx_queue_create(struct toe_channel *channel);
 
+void
+rx_queue_clear(struct rx_queue *queue);
+
 struct tx_queue {
     uint32_t cur_ack;
     uint32_t head;
@@ -111,21 +130,31 @@ tx_queue_dequeue(struct tx_queue *queue);
 toe_err_t
 tx_queue_enqueue(struct tx_queue *queue, struct rte_mbuf *pkt);
 
+void
+tx_queue_clear(struct tx_queue *queue);
+
 uint32_t
 tx_queue_capacity(struct tx_queue *queue);
 
 struct tx_queue *
 tx_queue_create(struct toe_channel *channel);
 
+typedef enum {
+   MODE_MASTER = 0,
+   MODE_SLAVE
+}channel_mode_t;
+
 struct toe_channel{
     uint16_t channel_id;
     rte_atomic64_t ip_id;
     rte_atomic64_t seq;
     struct rte_mempool *pool;
+    channel_mode_t mode;
+    uint64_t reset_timer;
     uint32_t state;
+    uint32_t retransmit;
     uint16_t port_id;
     uint16_t dev_rx_queue;
-    uint64_t rx_buf_len;
     struct rte_mbuf *rx_buf[RX_TX_QUEUE_SIZE];
     struct rx_queue *rx_queue;
     struct tx_queue *tx_queue;
@@ -158,11 +187,17 @@ toe_channel_do_connect_tx(struct toe_channel *channel);
 void
 toe_channel_do_tx_after_rx(struct toe_channel *channel);
 
+toe_err_t
+toe_channel_do_reset(struct toe_channel *channel);
+
 struct rte_mbuf *
 toe_channel_rx_queue_dequeue(struct toe_channel *channel);
 
 toe_err_t
 toe_channel_tx_queue_enqueue(struct toe_channel *channel, struct rte_mbuf *pkt);
+
+void
+toe_channel_do_retransmit(struct toe_channel *channel);
 
 struct rte_mbuf *
 toe_channel_tx_queue_dequeue(struct toe_channel *channel);
@@ -222,10 +257,10 @@ toe_channel_frame_fill_id(struct toe_channel *channel, struct rte_mbuf *pkt)
 }
 
 void
-toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n);
-
-void
 toe_channel_recv_conn(struct toe_channel *channel, struct rte_mbuf *pkt);
+
+struct rte_mbuf *
+toe_channel_gen_pkt(struct toe_channel *channel);
 
 __rte_unused void
 prefetch_channel(struct toe_channel *channel)

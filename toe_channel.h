@@ -54,6 +54,9 @@ toe_channel_tx(struct toe_channel *channel, struct rte_mbuf *pkt);
 struct rte_mbuf *
 toe_channel_rx(struct toe_channel *channel);
 
+__rte_unused toe_err_t
+toe_channel_reset(struct toe_channel *channel);
+
 const struct channel_stats *
 toe_channel_stats(struct toe_channel *channel);
 

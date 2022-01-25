@@ -171,6 +171,7 @@ toe_channel_create(struct channel_option *opt)
     channel->port_id = opt->port_id;
     channel->pool = rte_pktmbuf_pool_create(pool_name, 2048, 256, 0, 4096, (int)rte_socket_id());
     channel->dev_rx_queue = 1;
+    channel->mode = MODE_MASTER;
     strncpy(channel->name, opt->name, NAME_LEN);
 
     if(!channel->pool){
@@ -203,6 +204,7 @@ toe_channel_connect(struct toe_channel *channel)
     timeout = now + rte_get_timer_hz() * CONNECT_TIMEOUT;
 
     channel->state = STATE_INIT;
+    channel->mode = MODE_SLAVE;
 
     for(;;){
         now = rte_get_timer_cycles();
@@ -218,6 +220,7 @@ toe_channel_connect(struct toe_channel *channel)
 
         toe_channel_do_rx(channel);
         err = toe_channel_do_connect_tx(channel);
+        rte_delay_ms(2);
         if(err != TOE_SUCCESS)
             break;
     }
@@ -243,7 +246,6 @@ toe_channel_do_rx_burst(struct toe_channel *channel, uint16_t queue_n)
     }
     if(rxs != 0)
         channel->stats.rx_ether += rxs;
-    channel->rx_buf_len = rxs;
     return rxs;
 }
 
@@ -258,6 +260,10 @@ toe_err_t
 toe_channel_tx(struct toe_channel *channel, struct rte_mbuf *pkt)
 {
     toe_err_t  err;
+
+    if(unlikely(channel->state != STATE_EST))
+        return TOE_FAIL;
+
     err = toe_channel_tx_queue_enqueue(channel, pkt);
     if(err){
         rte_pktmbuf_free(pkt);
@@ -267,53 +273,63 @@ toe_channel_tx(struct toe_channel *channel, struct rte_mbuf *pkt)
     return err;
 }
 
-void
-toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n)
+static void
+toe_channel_proc_pkt(struct toe_channel *channel, struct rte_mbuf *pkt)
 {
-    struct rte_mbuf *pkt;
     struct frame_hdr *hdr;
-    uint8_t  flag;
+    uint8_t flag;
 
-    for(uint16_t i = 0; i < pkt_n; i++){
-        pkt = channel->rx_buf[i];
-        channel->stats.rx_bytes += rte_pktmbuf_pkt_len(pkt);
+    hdr = frame_hdr_mtod(pkt);
+    flag = hdr->frame_flag;
 
-        if(pkt->ol_flags & PKT_RX_IP_CKSUM_BAD){
-            channel->stats.rx_error += 1;
-            continue;
-        }
+    if(pkt->ol_flags & PKT_RX_IP_CKSUM_BAD){
+        channel->stats.rx_error += 1;
+        return;
+    }
 
-        if(unlikely(rte_pktmbuf_pkt_len(pkt) < frame_hdr_len))
-            continue;
-
-        hdr = frame_hdr_mtod(pkt);
-        flag = hdr->frame_flag;
+    if(unlikely(rte_pktmbuf_pkt_len(pkt) < frame_hdr_len)){
+        return ;
+    }
 
 #if DEBUG_TX_RX_LOG
-        char msg[256];
+    char msg[256];
         format_frame_hdr(msg, 256, hdr);
         RTE_LOG(INFO, EAL, "%s RX %s\n", channel->name, msg);
 #endif
 
+    channel->retransmit = 0;
 
-        if(likely(channel->state == STATE_EST)){
-            if(flag & FLAG_DATA_FRAME)
-                rx_queue_recv_data(channel->rx_queue, pkt);
-            if(flag & (FLAG_NACK_FRAME | FLAG_ACK_FRAME))
-                tx_queue_recv_ack(channel->tx_queue, pkt);
+    if(likely(channel->state == STATE_EST)){
+        if(flag & FLAG_DATA_FRAME){
+            rx_queue_recv_data(channel->rx_queue, pkt);
+            return;
         }
 
-
-        /** TODO 完整握手流程 */
-        if(unlikely(channel->state == STATE_INIT ||
-                channel->state & STATE_HANDSHAKE_MASK)) {
-            toe_channel_recv_conn(channel, pkt);
+        if(flag & (FLAG_NACK_FRAME | FLAG_ACK_FRAME)){
+            tx_queue_recv_ack(channel->tx_queue, pkt);
+            return;
         }
 
+        if(flag & FLAG_RESET_FRAME){
+            toe_channel_do_reset(channel);
+            return;
+        }
 
-        rte_pktmbuf_free(pkt);
+        return;
+    }
+
+    /** 非Established状态忽略RESET */
+    if(flag & FLAG_RESET_FRAME){
+        return;
+    }
+
+    if(channel->state == STATE_INIT ||
+        (channel->state & STATE_HANDSHAKE_MASK) ||
+        channel->state == STATE_RESET) {
+        toe_channel_recv_conn(channel, pkt);
     }
 }
+
 void
 toe_channel_recv_conn(struct toe_channel *channel, struct rte_mbuf *pkt)
 {
@@ -445,6 +461,15 @@ rx_queue_create(struct toe_channel *channel)
 }
 
 void
+rx_queue_clear(struct rx_queue *queue)
+{
+    queue->cur_ack = 0;
+    queue->send_ack = 0;
+    queue->state = RX_STATE_NORMAL;
+    queue->last_nack = 0;
+}
+
+void
 tx_queue_free_ack(struct tx_queue *queue, uint32_t ack)
 {
     if(queue->head == queue->tail)
@@ -477,6 +502,7 @@ tx_queue_dequeue(struct tx_queue *queue)
     if (unlikely((int64_t)(now - queue->retry_cycles) > 0)){
         queue->sent = queue->cur_ack;
         set_timer(&queue->retry_cycles, TX_RETRANSMIT_TIMER);
+        queue->channel->retransmit += 1;
     }
 
     if(unlikely(queue->tail == queue->head))
@@ -514,6 +540,23 @@ tx_queue_enqueue(struct tx_queue *queue, struct rte_mbuf *pkt)
     queue->queue[index] = pkt;
     queue->tail += 1;
     return 0;
+}
+
+void
+tx_queue_clear(struct tx_queue *queue)
+{
+    struct rte_mbuf *pkt;
+    for(uint32_t i = queue->head; i != queue->tail; i++){
+        pkt = queue->queue[i];
+        rte_pktmbuf_free(pkt);
+        queue->queue[i] = NULL;
+    }
+
+    queue->head = 0;
+    queue->tail = 0;
+    queue->sent = 0;
+    queue->cur_ack = 0;
+    queue->retry_cycles = 0;
 }
 
 void
@@ -639,12 +682,58 @@ toe_channel_do_tx(struct toe_channel *channel)
 void
 toe_channel_do_tx_after_rx(struct toe_channel *channel)
 {
-    struct rte_mbuf *pkt;
-
+    struct rte_mbuf *pkt = NULL;
     pkt = rx_queue_get_ack_pkt(channel->rx_queue, channel->pool);
-    if(pkt == NULL)
+    if(pkt)
+        toe_channel_do_tx_pkt(channel, pkt);
+
+    if(channel->retransmit > 1){
+        toe_channel_do_reset(channel);
+    } else {
+        toe_channel_do_retransmit(channel);
+    }
+}
+
+void
+toe_channel_do_retransmit(struct toe_channel *channel)
+{
+    struct rte_mbuf *pkt;
+    uint64_t now = rte_get_timer_cycles();
+    int64_t diff = (int64_t)(now - channel->tx_queue->retry_cycles);
+    if(likely(diff < 0))
         return;
+
+    for(;;){
+        pkt = toe_channel_tx_queue_dequeue(channel);
+        if(!pkt)
+            break;
+        toe_channel_do_tx_pkt(channel, pkt);
+    }
+}
+
+__rte_unused toe_err_t
+toe_channel_reset(struct toe_channel *channel)
+{
+    return toe_channel_do_reset(channel);
+}
+
+toe_err_t
+toe_channel_do_reset(struct toe_channel *channel)
+{
+    struct rte_mbuf *pkt;
+    channel->state = STATE_RESET;
+    channel->ip_id.cnt = 0;
+    channel->seq.cnt = 0;
+    memset(&channel->stats, 0, sizeof (struct channel_stats));
+    tx_queue_clear(channel->tx_queue);
+    rx_queue_clear(channel->rx_queue);
+
+    pkt = toe_channel_gen_pkt(channel);
+    frame_set_flags(pkt, FLAG_RESET_FRAME);
     toe_channel_do_tx_pkt(channel, pkt);
+
+    set_timer(&channel->reset_timer, TX_RETRANSMIT_TIMER * 2);
+    return TOE_SUCCESS;
 }
 
 struct rte_mbuf *
@@ -667,12 +756,19 @@ void
 toe_channel_do_rx(struct toe_channel *channel)
 {
     uint16_t total;
+    struct rte_mbuf *pkt;
 
     channel->rx_queue->send_ack = 0;
     total = toe_channel_do_rx_burst(channel, channel->dev_rx_queue);
     if(total == 0)
         return;
-    toe_channel_recv_pkt(channel, total);
+
+    for(uint16_t i = 0; i < total; i++){
+        pkt = channel->rx_buf[i];
+        channel->stats.rx_bytes += rte_pktmbuf_pkt_len(pkt);
+        toe_channel_proc_pkt(channel, pkt);
+        rte_pktmbuf_free(pkt);
+    }
 }
 
 struct rte_mbuf *
@@ -726,8 +822,10 @@ toe_channel_tx_queue_enqueue(struct toe_channel *channel, struct rte_mbuf *pkt)
 struct rte_mbuf *
 toe_channel_tx_queue_dequeue(struct toe_channel *channel)
 {
-    struct rte_mbuf *pkt;
-    pkt = tx_queue_dequeue(channel->tx_queue);
+    struct rte_mbuf *pkt = NULL;
+    if(likely(channel->state == STATE_EST && channel->retransmit < 2)){
+        pkt = tx_queue_dequeue(channel->tx_queue);
+    }
     return pkt;
 }
 
@@ -784,4 +882,20 @@ toe_channel_do_connect_tx(struct toe_channel *channel)
     channel->state = STATE_SENT_SYN;
     err = toe_channel_do_tx_pkt(channel, pkt);
     return  err;
+}
+
+struct rte_mbuf *
+toe_channel_gen_pkt(struct toe_channel *channel)
+{
+    struct rte_mbuf *pkt;
+    toe_err_t  err;
+
+    pkt = rte_pktmbuf_alloc(channel->pool);
+    if(unlikely(!pkt))
+        rte_panic("%s alloc mbuf failure\n", channel->name);
+    err = toe_channel_frame_prepend(channel, pkt);
+    if(unlikely(err))
+        rte_panic("%s append mbuf failure\n", channel->name);
+
+    return pkt;
 }
