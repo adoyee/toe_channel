@@ -145,14 +145,14 @@ main(int argc, char **argv)
     master_opt.local_ip = master_ip;
     master_opt.remote_ether = slave_ether;
     master_opt.local_ether = master_ether;
-    master_opt.port_id = 2;
+    master_opt.port_id = 0;
     master_opt.name = master_channel;
 
     slave_opt.remote_ip = master_ip;
     slave_opt.local_ip = slave_ip;
     slave_opt.remote_ether = master_ether;
     slave_opt.local_ether = slave_ether;
-    slave_opt.port_id = 3;
+    slave_opt.port_id = 1;
     slave_opt.name = slave_channel;
 
     char dev_master[256];
@@ -172,7 +172,6 @@ main(int argc, char **argv)
 
     for(;;){
         rte_delay_ms(1000);
-//        continue;
         if(!m_channel  || !s_channel)
             continue;
         const struct channel_stats *m_stats, *s_stats;

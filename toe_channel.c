@@ -108,10 +108,10 @@ format_frame_flag(char *buf, uint16_t size, const struct frame_hdr *hdr)
         case (FLAG_NACK_FRAME|FLAG_DATA_FRAME):
             snprintf(buf, size, "FLAG_NACK|FLAG_DATA");
             break;
-        case (FLAG_HANDSHAKE_FRAME |FLAG_SYN_FRAME):
+        case FLAG_SYN_FRAME:
             snprintf(buf, size, "FLAG_SYN");
             break;
-        case (FLAG_HANDSHAKE_FRAME |FLAG_ACK_FRAME):
+        case (FLAG_ACK_FRAME|FLAG_SYN_FRAME):
             snprintf(buf, size, "FLAG_SYN_ACK");
             break;
         case 0:
@@ -131,11 +131,11 @@ format_frame_hdr(char *buf, uint16_t size, const struct frame_hdr *hdr)
 
     format_frame_flag(flag, sizeof (flag), hdr);
 
-    snprintf(buf, size, "[FRAME: ip_id=%d [%s] frame_seq=%d, frame_ack=%d, addr = %p]",
+    snprintf(buf, size, "[FRAME: ip_id=%d %s frame_seq=%d, frame_ack=%d]",
              be16toh(hdr->frame_ip_id),
              flag,
              be32toh(hdr->frame_seq),
-             be32toh(hdr->frame_ack), hdr);
+             be32toh(hdr->frame_ack));
 }
 
 const struct channel_stats *
@@ -196,26 +196,36 @@ toe_channel_create(struct channel_option *opt)
 toe_err_t
 toe_channel_connect(struct toe_channel *channel)
 {
-    struct rte_mbuf *pkt;
-    struct frame_hdr *hdr;
     toe_err_t  err;
+    uint64_t now, timeout;
 
-    pkt = rte_pktmbuf_alloc(channel->pool);
-    if(!pkt){
-        return 1;
+    now = rte_get_timer_cycles();
+    timeout = now + rte_get_timer_hz() * CONNECT_TIMEOUT;
+
+    channel->state = STATE_INIT;
+
+    for(;;){
+        now = rte_get_timer_cycles();
+        if(channel->state == STATE_EST){
+            err = TOE_SUCCESS;
+            break;
+        }
+
+        if(now > timeout){
+            err = TOE_TIMEOUT;
+            break;
+        }
+
+        toe_channel_do_rx(channel);
+        err = toe_channel_do_connect_tx(channel);
+        if(err != TOE_SUCCESS)
+            break;
+    }
+    if(channel->state == STATE_EST){
+        RTE_LOG(INFO, EAL, "TOE CHANNEL CONNECTED\n");
     }
 
-    err = toe_channel_frame_prepend(channel, pkt);
-    if(unlikely(err))
-        return err;
-
-    hdr = frame_hdr_mtod(pkt);
-    hdr->frame_flag |= FLAG_SYN_FRAME;
-    hdr->frame_flag |= FLAG_HANDSHAKE_FRAME;
-
-    toe_channel_do_tx_pkt(channel, pkt);
-    channel->state = CHANNEL_STATE_EST;
-    return 0;
+    return err;
 }
 
 uint16_t
@@ -279,25 +289,64 @@ toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n)
         hdr = frame_hdr_mtod(pkt);
         flag = hdr->frame_flag;
 
-        /** TODO 完整握手流程 */
-        if(unlikely(flag & FLAG_HANDSHAKE_FRAME)){
-            channel->state = CHANNEL_STATE_EST;
-            rte_pktmbuf_free(pkt);
-            return;
-        }
-
 #if DEBUG_TX_RX_LOG
         char msg[256];
         format_frame_hdr(msg, 256, hdr);
         RTE_LOG(INFO, EAL, "%s RX %s\n", channel->name, msg);
 #endif
 
-        if(flag & FLAG_DATA_FRAME)
-            rx_queue_recv_data(channel->rx_queue, pkt);
-        if(flag & (FLAG_NACK_FRAME | FLAG_ACK_FRAME))
-            tx_queue_recv_ack(channel->tx_queue, pkt);
+
+        if(likely(channel->state == STATE_EST)){
+            if(flag & FLAG_DATA_FRAME)
+                rx_queue_recv_data(channel->rx_queue, pkt);
+            if(flag & (FLAG_NACK_FRAME | FLAG_ACK_FRAME))
+                tx_queue_recv_ack(channel->tx_queue, pkt);
+        }
+
+
+        /** TODO 完整握手流程 */
+        if(unlikely(channel->state == STATE_INIT ||
+                channel->state & STATE_HANDSHAKE_MASK)) {
+            toe_channel_recv_conn(channel, pkt);
+        }
+
 
         rte_pktmbuf_free(pkt);
+    }
+}
+void
+toe_channel_recv_conn(struct toe_channel *channel, struct rte_mbuf *pkt)
+{
+    struct frame_hdr *hdr;
+    struct rte_mbuf *resp;
+    uint8_t flags;
+
+    hdr = frame_hdr_mtod(pkt);
+    flags = hdr->frame_flag;
+
+    if(flags == FLAG_SYN_FRAME){
+        resp = rte_pktmbuf_clone(pkt, pkt->pool);
+        hdr->frame_flag = (FLAG_ACK_FRAME | FLAG_SYN_FRAME);
+        toe_channel_do_tx_pkt(channel, resp);
+        channel->state = STATE_WAIT_LAST_ACK;
+        return;
+    }
+
+    switch (channel->state) {
+        case STATE_SENT_SYN:
+            if(flags == (FLAG_ACK_FRAME | FLAG_SYN_FRAME)){
+                resp = rte_pktmbuf_clone(pkt, pkt->pool);
+                hdr->frame_flag = FLAG_ACK_FRAME;
+                toe_channel_do_tx_pkt(channel, resp);
+                channel->state = STATE_EST;
+            }
+            break;
+
+        case STATE_WAIT_LAST_ACK:
+            if(flags == FLAG_ACK_FRAME){
+                channel->state = STATE_EST;
+            }
+            break;
     }
 }
 
@@ -567,7 +616,7 @@ toe_channel_do_tx_pkt(struct toe_channel *channel, struct rte_mbuf *pkt)
         channel->stats.tx_ether += 1;
 
 #if  DEBUG_TX_RX_LOG
-        RTE_LOG(ERR, EAL, "%s TX :FRAME :%s\n", channel->name, msg);
+        RTE_LOG(INFO, EAL, "%s TX :FRAME :%s\n", channel->name, msg);
 #endif
 
         return TOE_SUCCESS;
@@ -709,4 +758,30 @@ toe_channel_frame_prepend(struct toe_channel *channel, struct rte_mbuf *pkt)
     hdr->tcp_hdr.data_off = 0x50;
 
     return 0;
+}
+
+toe_err_t
+toe_channel_do_connect_tx(struct toe_channel *channel)
+{
+    toe_err_t err;
+    struct rte_mbuf *pkt;
+    struct frame_hdr *hdr;
+
+    if(channel->state == STATE_EST){
+        return TOE_SUCCESS;
+    }
+
+    if(channel->state != STATE_INIT){
+        return TOE_SUCCESS;
+    }
+
+    pkt = rte_pktmbuf_alloc(channel->pool);
+    assert(pkt);
+    toe_channel_frame_prepend(channel, pkt);
+    hdr = frame_hdr_mtod(pkt);
+
+    hdr->frame_flag = FLAG_SYN_FRAME;
+    channel->state = STATE_SENT_SYN;
+    err = toe_channel_do_tx_pkt(channel, pkt);
+    return  err;
 }

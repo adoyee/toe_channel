@@ -16,7 +16,12 @@ extern "C" {
 #define FLAG_ACK_FRAME          RTE_TCP_ACK_FLAG
 #define FLAG_NACK_FRAME         RTE_TCP_URG_FLAG
 #define FLAG_DATA_FRAME         RTE_TCP_PSH_FLAG
-#define FLAG_HANDSHAKE_FRAME    RTE_TCP_ECE_FLAG
+
+#define STATE_INIT              0x0000
+#define STATE_EST               0x0100
+#define STATE_SENT_SYN          0x0001
+#define STATE_WAIT_LAST_ACK     0x0010
+#define STATE_HANDSHAKE_MASK    0x00FF
 
 /** 最大允许未确认包数 */
 #define FRAME_ACK_SIZE          256
@@ -28,6 +33,8 @@ extern "C" {
 #define TX_RETRANSMIT_TIMER     20
 /** tcp_port = port_offset + channel_id */
 #define PORT_OFFSET             8000
+/** 连接超时(秒) */
+#define CONNECT_TIMEOUT         30
 
 #define NAME_LEN                32
 
@@ -110,17 +117,12 @@ tx_queue_capacity(struct tx_queue *queue);
 struct tx_queue *
 tx_queue_create(struct toe_channel *channel);
 
-typedef enum {
-    CHANNEL_STATE_INIT = 0,
-    CHANNEL_STATE_EST
-} channel_state_t;
-
 struct toe_channel{
     uint16_t channel_id;
     rte_atomic64_t ip_id;
     rte_atomic64_t seq;
     struct rte_mempool *pool;
-    channel_state_t state;
+    uint32_t state;
     uint16_t port_id;
     uint16_t dev_rx_queue;
     uint64_t rx_buf_len;
@@ -149,6 +151,9 @@ toe_channel_do_tx(struct toe_channel *channel);
 
 toe_err_t
 toe_channel_do_tx_pkt(struct toe_channel *channel, struct rte_mbuf *pkt);
+
+toe_err_t
+toe_channel_do_connect_tx(struct toe_channel *channel);
 
 void
 toe_channel_do_tx_after_rx(struct toe_channel *channel);
@@ -218,6 +223,9 @@ toe_channel_frame_fill_id(struct toe_channel *channel, struct rte_mbuf *pkt)
 
 void
 toe_channel_recv_pkt(struct toe_channel *channel, uint16_t pkt_n);
+
+void
+toe_channel_recv_conn(struct toe_channel *channel, struct rte_mbuf *pkt);
 
 __rte_unused void
 prefetch_channel(struct toe_channel *channel)

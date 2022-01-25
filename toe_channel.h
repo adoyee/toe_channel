@@ -13,6 +13,7 @@ typedef int toe_err_t;
 
 #define TOE_SUCCESS     0
 #define TOE_FAIL        1
+#define TOE_TIMEOUT     2
 
 
 struct channel_option {
